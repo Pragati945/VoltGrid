@@ -1,0 +1,17 @@
+# Environment secrets - NEVER commit these
+.env
+api/.env
+
+# Dependencies - regenerated with npm install
+node_modules/
+api/node_modules/
+
+# OS/editor clutter
+.DS_Store
+Thumbs.db
+.vscode/
+
+# Postman local-mode files
+.postman/
+postman/
+resources.yaml
