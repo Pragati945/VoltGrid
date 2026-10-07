@@ -17,7 +17,6 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
-
   adminer:
     image: adminer
     container_name: voltgrid_adminer
@@ -26,6 +25,5 @@ services:
       - "8080:8080"
     depends_on:
       - postgres
-
 volumes:
   pgdata:
