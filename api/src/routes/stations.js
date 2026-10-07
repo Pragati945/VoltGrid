@@ -1,10 +1,7 @@
 const express = require('express');
 const pool = require('../db');
 const { authenticate, requireRole } = require('../middleware/auth');
-
 const router = express.Router();
-
-// GET /stations - public to any logged-in user
 router.get('/', authenticate, async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM stations ORDER BY id');
@@ -14,8 +11,6 @@ router.get('/', authenticate, async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch stations' });
   }
 });
-
-// GET /stations/:id - includes its chargers
 router.get('/:id', authenticate, async (req, res) => {
   try {
     const station = await pool.query('SELECT * FROM stations WHERE id = $1', [req.params.id]);
@@ -31,14 +26,11 @@ router.get('/:id', authenticate, async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch station' });
   }
 });
-
-// POST /stations - admin or operator only
 router.post('/', authenticate, requireRole('admin', 'operator'), async (req, res) => {
   const { name, latitude, longitude, address } = req.body;
   if (!name) {
     return res.status(400).json({ error: 'name is required' });
   }
-
   try {
     const result = await pool.query(
       `INSERT INTO stations (name, operator_id, latitude, longitude, address)
@@ -52,8 +44,6 @@ router.post('/', authenticate, requireRole('admin', 'operator'), async (req, res
     res.status(500).json({ error: 'Failed to create station' });
   }
 });
-
-// DELETE /stations/:id - admin only
 router.delete('/:id', authenticate, requireRole('admin'), async (req, res) => {
   try {
     const result = await pool.query('DELETE FROM stations WHERE id = $1 RETURNING id', [
@@ -68,5 +58,4 @@ router.delete('/:id', authenticate, requireRole('admin'), async (req, res) => {
     res.status(500).json({ error: 'Failed to delete station' });
   }
 });
-
 module.exports = router;
