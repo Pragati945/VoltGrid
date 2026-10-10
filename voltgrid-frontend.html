@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VoltGrid</title>
+<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+<style>
+:root{--bg:#121c26;--panel:#1b2a38;--line:#2d4256;--tx:#e8eef3;--mu:#8fa3b3;--ok:#3ddc84;--busy:#f5b83d;--bad:#ff6b5e;--off:#7a8894;--ac:#4cc3ff}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);font:15px/1.5 system-ui,Segoe UI,sans-serif}
+header{display:flex;align-items:center;gap:12px;padding:12px 20px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+header h1{font-size:19px;margin:0;margin-right:auto}
+#dot{width:10px;height:10px;border-radius:50%;background:var(--off)}#dot.on{background:var(--ok)}
+main{max-width:980px;margin:0 auto;padding:20px}
+nav{display:flex;gap:6px;margin-bottom:18px;flex-wrap:wrap}
+nav button{background:none;border:1px solid var(--line);color:var(--mu);padding:8px 14px;border-radius:8px;cursor:pointer;font:inherit}
+nav button.on{background:var(--ac);color:#04202e;border-color:var(--ac);font-weight:600}
+button,select,input{font:inherit}
+.btn{background:var(--ac);color:#04202e;border:0;padding:7px 14px;border-radius:7px;cursor:pointer;font-weight:600}
+.btn.ghost{background:none;color:var(--tx);border:1px solid var(--line)}.btn.sm{padding:4px 10px;font-size:13px}
+.btn.red{background:var(--bad);color:#2a0905}
+:focus-visible{outline:2px solid var(--ac);outline-offset:2px}
+input,select{background:var(--bg);color:var(--tx);border:1px solid var(--line);border-radius:7px;padding:8px 10px;width:100%}
+label{display:block;margin:10px 0 4px;color:var(--mu);font-size:13px}
+.box{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:16px}
+.box h2,.box h3{margin:0 0 4px}.mu{color:var(--mu);font-size:13px}
+.auth{max-width:380px;margin:50px auto}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:10px;margin-top:12px}
+.ch{border:1px solid var(--line);border-left:5px solid var(--off);border-radius:8px;padding:10px;background:var(--bg)}
+.ch.available{border-left-color:var(--ok)}.ch.occupied{border-left-color:var(--busy)}.ch.faulted{border-left-color:var(--bad)}
+.pill{font-size:12px;padding:1px 8px;border-radius:99px;border:1px solid currentColor}
+.available .pill,.s-available,.s-confirmed,.s-active{color:var(--ok)}.occupied .pill{color:var(--busy)}.faulted .pill,.s-cancelled{color:var(--bad)}.offline .pill,.s-completed{color:var(--off)}
+.row{display:flex;gap:8px;align-items:center;justify-content:space-between;padding:9px 0;border-bottom:1px solid var(--line);flex-wrap:wrap}
+.row:last-child{border:0}.acts{display:flex;gap:6px}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+#toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--panel);border:1px solid var(--ac);padding:10px 16px;border-radius:8px;max-width:90%;display:none;z-index:9}
+#toast.bad{border-color:var(--bad)}
+dialog{background:var(--panel);color:var(--tx);border:1px solid var(--line);border-radius:12px;padding:20px;width:min(380px,92vw)}
+dialog::backdrop{background:#000a}
+.ev{font:12px monospace;padding:6px 0;border-bottom:1px solid var(--line);white-space:pre-wrap;word-break:break-word}.ev b{color:var(--ac)}
+.hide{display:none!important}
+</style>
+</head>
+<body>
+<header>
+  <h1>VoltGrid</h1>
+  <span id="dot" title="Live connection"></span>
+  <span id="who" class="mu"></span>
+  <button id="out" class="btn ghost sm hide">Log out</button>
+</header>
+<main>
+  <section id="auth" class="box auth hide">
+    <h2 id="at">Log in</h2>
+    <p class="mu">Use your own account. Seeded demo users cannot log in unless you set their passwords.</p>
+    <div id="nm" class="hide"><label>Name</label><input id="n">
+      <label>I am signing up as</label><select id="rl"><option value="driver">Driver (book chargers for my vehicle)</option><option value="operator">Station operator (manage stations and chargers)</option></select>
+      <div id="oc" class="hide"><label>Invite code from an admin (required for operators)</label><input id="ocv"></div></div>
+    <label>Email</label><input id="e" type="email">
+    <label>Password (8+ characters)</label><input id="p" type="password">
+    <p><button id="go" class="btn">Log in</button> <button id="sw" class="btn ghost">Create account</button></p>
+  </section>
+  <section id="app" class="hide">
+    <nav id="tabs"></nav>
+    <div id="view"></div>
+  </section>
+</main>
+<dialog id="dlg"></dialog>
+<div id="toast"></div>
+<script>
+const API = 'http://10.75.139.184:4000'; // change if your API runs elsewhere
+const $ = s => document.querySelector(s);
+const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const when = d => d ? new Date(d).toLocaleString() : '';
+let token = null, user = null, tab = 'chargers', reg = false, sock = null, feed = [], qStation = '';
+let D = {stations:[], chargers:[], vehicles:[], models:[], bookings:[], queue:[], invites:[]};
+try { token = localStorage.getItem('vg_t'); user = JSON.parse(localStorage.getItem('vg_u') || 'null'); } catch(e){}
+const staff = () => user && ['admin','operator'].includes(user.role);
+
+function toast(m, bad){ const t=$('#toast'); t.textContent=m; t.className=bad?'bad':''; t.style.display='block'; clearTimeout(toast.h); toast.h=setTimeout(()=>t.style.display='none',3500); }
+async function api(p, m='GET', b){
+  let r;
+  try { r = await fetch(API+p,{method:m,headers:{'Content-Type':'application/json',...(token?{Authorization:'Bearer '+token}:{})},body:b?JSON.stringify(b):undefined}); }
+  catch(e){ throw new Error('Cannot reach the API at '+API+'. Is "npm start" running?'); }
+  const d = r.status===204 ? {} : await r.json().catch(()=>({}));
+  if (r.status===401 && token && !p.startsWith('/auth')) { logout(); throw new Error('Session expired. Please log in again.'); }
+  if (!r.ok) throw new Error(d.error || 'Request failed ('+r.status+')');
+  return d;
+}
+const run = async (fn, ok) => { try { await fn(); if (ok) toast(ok); } catch(e){ toast(e.message,true); } };
+
+/* ---------- auth ---------- */
+function showAuth(){ $('#auth').classList.remove('hide'); $('#app').classList.add('hide'); $('#out').classList.add('hide'); $('#who').textContent=''; }
+function authMode(){ $('#at').textContent = reg?'Create account':'Log in'; $('#go').textContent = reg?'Create account':'Log in'; $('#sw').textContent = reg?'I already have an account':'Create account'; $('#nm').classList.toggle('hide',!reg); }
+$('#sw').onclick = () => { reg=!reg; authMode(); };
+$('#rl').onchange = () => $('#oc').classList.toggle('hide', $('#rl').value !== 'operator');
+$('#go').onclick = () => run(async () => {
+  const body = {email:$('#e').value.trim(), password:$('#p').value};
+  if (reg) { body.name = $('#n').value.trim(); body.role = $('#rl').value; if (body.role === 'operator') body.operator_code = $('#ocv').value.trim(); }
+  const d = await api(reg?'/auth/register':'/auth/login','POST',body);
+  token=d.token; user=d.user;
+  try { localStorage.setItem('vg_t',token); localStorage.setItem('vg_u',JSON.stringify(user)); } catch(e){}
+  start();
+});
+function logout(){ token=null; user=null; try{localStorage.removeItem('vg_t');localStorage.removeItem('vg_u');}catch(e){} if(sock){sock.disconnect();sock=null;} $('#dot').className=''; showAuth(); }
+$('#out').onclick = logout;
+
+/* ---------- data + live updates ---------- */
+async function load(){
+  const g = p => api(p).catch(() => []);
+  let [s,c,v,m,b,q,inv] = await Promise.all([g('/stations'),g('/chargers'),g('/vehicles'),g('/vehicles/models'),g('/bookings'),g('/queue'), user.role==='admin' ? g('/invites') : []]);
+  if (user.role === 'operator') { // operators only see and manage their own stations
+    s = s.filter(x => x.operator_id == user.id); const ids = new Set(s.map(x => x.id));
+    c = c.filter(x => ids.has(x.station_id)); q = q.filter(x => ids.has(x.station_id));
+  }
+  D = {stations:s, chargers:c, vehicles:v, models:m, bookings:b, queue:q, invites:inv};
+  if (!qStation && s.length) qStation = s[0].id;
+  render();
+}
+let t; const soon = () => { clearTimeout(t); t = setTimeout(() => run(load), 250); };
+function connect(){
+  if (sock) return;
+  sock = io(API);
+  sock.on('connect', () => $('#dot').className='on');
+  sock.on('disconnect', () => $('#dot').className='');
+  ['booking:created','booking:started','booking:completed','booking:cancelled','charger:updated','queue:updated','telemetry:new'].forEach(ev =>
+    sock.on(ev, data => {
+      feed.unshift({ev, data, at:new Date().toLocaleTimeString()}); feed = feed.slice(0,60);
+      if (ev !== 'telemetry:new') soon(); else if (tab==='live') render();
+    }));
+}
+function start(){
+  $('#auth').classList.add('hide'); $('#app').classList.remove('hide'); $('#out').classList.remove('hide');
+  $('#who').textContent = user.name+' ('+user.role+')';
+  connect(); run(load);
+}
+
+/* ---------- views ---------- */
+const tabs = () => user.role === 'driver'
+  ? {chargers:'Chargers', bookings:'My bookings', vehicles:'Vehicles', queue:'Waiting list', live:'Live feed'}
+  : {chargers:'Stations', bookings: user.role === 'operator' ? 'Bookings at my stations' : 'All bookings', ...(user.role === 'admin' ? {vehicles:'Vehicles', invites:'Invites'} : {}), queue:'Waiting list', live:'Live feed'};
+function render(){
+  if (!tabs()[tab]) tab = 'chargers';
+  $('#tabs').innerHTML = Object.entries(tabs()).map(([k,v]) => `<button class="${k===tab?'on':''}" data-a="tab" data-id="${k}">${v}</button>`).join('');
+  $('#view').innerHTML = ({chargers:vChargers, bookings:vBookings, vehicles:vVehicles, queue:vQueue, live:vLive, invites:vInvites})[tab]();
+}
+const vname = id => { const v = D.vehicles.find(x => x.id == id); return v ? v.brand+' '+v.model_name : 'Vehicle #'+id; };
+
+const vChargers = () => vChargersList() + (staff() ? vManage() : '');
+function vChargersList(){
+  if (!D.stations.length) return `<div class="box">${user.role === 'operator' ? "You don't manage any stations yet. Add one below, or ask an admin to assign one to you." : 'No stations yet.'}</div>`;
+  return D.stations.map(s => `<div class="box"><h3>${esc(s.name)}</h3><span class="mu">${esc(s.address)}</span><div class="grid">` +
+    D.chargers.filter(c => c.station_id == s.id).map(c => `<div class="ch ${c.status}">
+      <b>Charger #${c.id}</b> <span class="pill">${c.status}</span>
+      <div class="mu">${esc(c.connector_type)} &middot; ${c.power_rating_kw} kW</div>
+      <div class="acts" style="margin-top:8px">
+        ${['available','occupied'].includes(c.status) && user.role !== 'operator' ? `<button class="btn sm" data-a="book" data-id="${c.id}">Book</button>` : ''}
+        ${staff() ? `<select data-a="cstat" data-id="${c.id}" style="width:auto;padding:3px">${['available','occupied','faulted','offline'].map(x=>`<option ${x===c.status?'selected':''}>${x}</option>`).join('')}</select>` : ''}
+      </div></div>`).join('') + '</div></div>').join('');
+}
+function vBookings(){
+  if (!D.bookings.length) return `<div class="box">${user.role === 'operator' ? (D.stations.length ? 'No bookings at your stations yet.' : "You don't manage any stations yet. Add one in the Stations tab, or ask an admin to assign one to you.") : staff() ? 'No bookings yet.' : 'No bookings yet. Go to Chargers and book one.'}</div>`;
+  return '<div class="box">' + D.bookings.map(b => `<div class="row">
+    <div><b>Booking #${b.id}</b> <span class="s-${b.status}">${b.status}</span><div class="mu">Charger #${b.charger_id} &middot; ${esc(vname(b.vehicle_id))}${staff() ? ' &middot; driver #' + b.user_id : ''} &middot; ${when(b.start_time)} to ${when(b.end_time)}</div></div>
+    <div class="acts">
+      ${b.status==='confirmed' ? `<button class="btn sm" data-a="start" data-id="${b.id}">Start charging</button>` : ''}
+      ${b.status==='active' ? `<button class="btn sm" data-a="done" data-id="${b.id}">Finish charging</button>` : ''}
+      ${['pending','confirmed','active'].includes(b.status) ? `<button class="btn sm red" data-a="cancel" data-id="${b.id}">Cancel</button>` : ''}
+    </div></div>`).join('') + '</div>';
+}
+function vVehicles(){
+  const list = D.vehicles.length ? D.vehicles.map(v => `<div class="row"><div><b>${esc(v.brand)} ${esc(v.model_name)}</b> ${v.is_emergency?'<span class="pill" style="color:var(--bad)">emergency</span>':''}
+    <div class="mu">${v.battery_capacity_kwh} kWh &middot; ${esc(v.connector_type)}</div></div>
+    <button class="btn sm ghost" data-a="delveh" data-id="${v.id}">Remove</button></div>`).join('') : '<p class="mu">You have no vehicles. Add one below, then you can book.</p>';
+  return `<div class="box"><h3>Your vehicles</h3>${list}</div>
+  <div class="box"><h3>Add a vehicle</h3><label>Model</label><select id="vm">${D.models.map(m=>`<option value="${m.id}">${esc(m.brand)} ${esc(m.model_name)}</option>`).join('')}</select>
+  ${user.role==='admin' ? '<label><input type="checkbox" id="ve" style="width:auto"> Emergency vehicle</label>' : ''}
+  <p><button class="btn" data-a="addveh">Add vehicle</button></p></div>`;
+}
+function vQueue(){
+  const q = D.queue.filter(x => x.station_id == qStation);
+  return `<div class="box"><h3>${user.role === 'operator' ? 'Choose a station' : 'Join the waiting list'}</h3><p class="mu">Emergency vehicles move to the front.</p>
+  <div class="two"><div><label>Station</label><select id="qs" data-a="qstation">${D.stations.map(s=>`<option value="${s.id}" ${s.id==qStation?'selected':''}>${esc(s.name)}</option>`).join('')}</select></div>
+  <div class="${user.role === 'operator' ? 'hide' : ''}"><label>Vehicle</label><select id="qv">${D.vehicles.map(v=>`<option value="${v.id}">${esc(v.brand)} ${esc(v.model_name)} (#${v.id})</option>`).join('')}</select></div></div>
+  <p class="${user.role === 'operator' ? 'hide' : ''}"><button class="btn" data-a="join">Join list</button></p></div>
+  <div class="box"><h3>Waiting at this station</h3>${q.length ? q.map((e,i) => `<div class="row"><div><b>${i+1}. ${esc(e.brand)} ${esc(e.model_name)}</b> ${e.priority_level>0?'<span class="pill" style="color:var(--bad)">emergency</span>':''}
+    <div class="mu">since ${when(e.requested_at)}</div></div><button class="btn sm red" data-a="qcancel" data-id="${e.id}">Leave list</button></div>`).join('') : '<p class="mu">Nobody is waiting.</p>'}</div>`;
+}
+function vLive(){
+  return '<div class="box"><h3>Live feed</h3><p class="mu">Events from every user and the simulator appear here instantly.</p>' +
+    (feed.length ? feed.map(f => `<div class="ev"><b>${f.ev}</b> ${f.at}\n${esc(JSON.stringify(f.data))}</div>`).join('') : '<p class="mu">Waiting for events. Make a booking or start the simulator.</p>') + '</div>';
+}
+
+function vInvites(){
+  const st = i => i.revoked ? 'revoked' : i.used_by ? 'used' : new Date(i.expires_at) < new Date() ? 'expired' : 'unused';
+  return `<div class="box"><h3>Create operator invite</h3><p class="mu">Each code works once. Give it to one person.</p>
+  <div class="two"><div><label>Who is it for?</label><input id="ivn"></div><div><label>Valid for</label><select id="ivd"><option value="1">1 day</option><option value="7" selected>7 days</option><option value="30">30 days</option></select></div></div>
+  <p><button class="btn" data-a="mkinv">Create invite</button></p></div>
+  <div class="box"><h3>Invites</h3>${D.invites.length ? D.invites.map(i => `<div class="row"><div><b style="font-family:monospace">${esc(i.code)}</b> <span class="pill">${st(i)}</span>
+    <div class="mu">${esc(i.note)} &middot; expires ${when(i.expires_at)}</div></div>${st(i)==='unused' ? `<button class="btn sm red" data-a="revinv" data-id="${i.id}">Revoke</button>` : ''}</div>`).join('') : '<p class="mu">No invites yet.</p>'}</div>`;
+}
+function vManage(){
+  return `<div class="box"><h3>Add a station</h3><div class="two"><div><label>Name</label><input id="sn"></div><div><label>Address</label><input id="sa"></div></div>
+  <p><button class="btn" data-a="addstation">Add station</button></p></div>
+  <div class="box"><h3>Add a charger</h3><div class="two"><div><label>Station</label><select id="cs">${D.stations.map(s=>`<option value="${s.id}">${esc(s.name)}</option>`).join('')}</select></div>
+  <div><label>Connector (e.g. CCS2)</label><input id="cc" value="CCS2"></div></div><label>Power (kW)</label><input id="ck" type="number" value="30">
+  <p><button class="btn" data-a="addcharger">Add charger</button></p></div>`;
+}
+
+/* ---------- actions ---------- */
+const nowLocal = () => { const d = new Date(Date.now() - new Date().getTimezoneOffset()*60000); return d.toISOString().slice(0,16); };
+const A = {
+  tab: id => { tab = id; render(); },
+  book: id => {
+    if (!D.vehicles.length) return toast('Add a vehicle first (Vehicles tab).', true);
+    $('#dlg').innerHTML = `<h3>Book charger #${id}</h3><label>Vehicle</label><select id="bv">${D.vehicles.map(v=>`<option value="${v.id}">${esc(v.brand)} ${esc(v.model_name)} (#${v.id})</option>`).join('')}</select>
+      <label>Start time (now, or pick a future time)</label><input id="bt" type="datetime-local" value="${nowLocal()}">
+      <label>How long?</label><select id="bd"><option value="30">30 minutes</option><option value="60" selected>1 hour</option><option value="120">2 hours</option><option value="240">4 hours</option></select>
+      <p class="acts"><button class="btn" id="bok">Confirm booking</button><button class="btn ghost" id="bno">Close</button></p>`;
+    $('#dlg').showModal();
+    $('#bno').onclick = () => $('#dlg').close();
+    $('#bok').onclick = () => run(async () => {
+      await api('/bookings','POST',{vehicle_id:+$('#bv').value, charger_id:+id, start_time:new Date($('#bt').value).toISOString(), duration_minutes:+$('#bd').value});
+      $('#dlg').close(); tab='bookings'; await load();
+    }, 'Booking confirmed');
+  },
+  start: id => run(async () => { await api('/bookings/'+id+'/start','PATCH'); await load(); }, 'Charging started'),
+  cancel: id => run(async () => { await api('/bookings/'+id+'/cancel','PATCH'); await load(); }, 'Booking cancelled'),
+  done: id => run(async () => { await api('/bookings/'+id+'/complete','PATCH'); await load(); }, 'Charging finished'),
+  addveh: () => run(async () => { await api('/vehicles','POST',{model_id:+$('#vm').value, is_emergency:!!($('#ve')&&$('#ve').checked)}); await load(); }, 'Vehicle added'),
+  delveh: id => run(async () => { await api('/vehicles/'+id,'DELETE'); await load(); }, 'Vehicle removed'),
+  join: () => run(async () => { await api('/queue','POST',{station_id:+$('#qs').value, vehicle_id:+$('#qv').value}); await load(); }, 'Added to the waiting list'),
+  qcancel: id => run(async () => { await api('/queue/'+id+'/cancel','PATCH'); await load(); }, 'Removed from the waiting list'),
+  qstation: () => { qStation = $('#qs').value; render(); },
+  addstation: () => run(async () => { await api('/stations','POST',{name:$('#sn').value.trim(), address:$('#sa').value.trim()}); await load(); }, 'Station added'),
+  addcharger: () => run(async () => { await api('/chargers','POST',{station_id:+$('#cs').value, connector_type:$('#cc').value.trim(), power_rating_kw:+$('#ck').value}); await load(); }, 'Charger added'),
+  mkinv: () => run(async () => { const i = await api('/invites','POST',{note:$('#ivn').value.trim(), days:+$('#ivd').value}); await load(); toast('Invite created: '+i.code); }),
+  revinv: id => run(async () => { await api('/invites/'+id,'DELETE'); await load(); }, 'Invite revoked'),
+  cstat: id => run(async () => { await api('/chargers/'+id+'/status','PATCH',{status:document.querySelector('select[data-a=cstat][data-id="'+id+'"]').value}); await load(); }, 'Charger updated'),
+};
+document.addEventListener('click', e => { const b = e.target.closest('button[data-a]'); if (b) A[b.dataset.a](b.dataset.id); });
+document.addEventListener('change', e => { const s = e.target.closest('select[data-a]'); if (s) A[s.dataset.a](s.dataset.id); });
+
+authMode();
+token && user ? start() : showAuth();
+</script>
+</body>
+</html>
