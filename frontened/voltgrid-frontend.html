@@ -68,7 +68,7 @@ dialog::backdrop{background:#000a}
 <dialog id="dlg"></dialog>
 <div id="toast"></div>
 <script>
-const API = 'http://localhost:4000'; // change if your API runs elsewhere
+const API = 'http://10.75.139.184:4000'; // change if your API runs elsewhere
 const $ = s => document.querySelector(s);
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const when = d => d ? new Date(d).toLocaleString() : '';
