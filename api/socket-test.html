@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>VoltGrid — Live Socket Test</title>
+<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+<style>
+  body { font-family: system-ui, sans-serif; background:#0f1115; color:#e6e6e6; margin:0; padding:24px; }
+  h1 { font-size: 20px; margin-bottom: 4px; }
+  #status { font-size: 13px; margin-bottom: 16px; }
+  #status.connected { color: #4ade80; }
+  #status.disconnected { color: #f87171; }
+  #log { background:#1a1d24; border-radius:8px; padding:12px; height:70vh; overflow-y:auto; font-family: monospace; font-size: 13px; }
+  .event { padding: 8px 10px; border-bottom: 1px solid #262a33; }
+  .event:last-child { border-bottom: none; }
+  .event .type { color:#60a5fa; font-weight:bold; margin-right:8px; }
+  .event .time { color:#6b7280; font-size:11px; float:right; }
+  pre { margin: 4px 0 0 0; white-space: pre-wrap; color:#d1d5db; }
+</style>
+</head>
+<body>
+  <h1>VoltGrid — Live Event Stream</h1>
+  <div id="status" class="disconnected">Connecting...</div>
+  <div id="log"></div>
+
+  <script>
+    // Plain-browser version (no bundler) of what a React frontend would do.
+    const socket = io('http://localhost:4000');
+    const statusEl = document.getElementById('status');
+    const logEl = document.getElementById('log');
+
+    socket.on('connect', () => {
+      statusEl.textContent = 'Connected — socket id: ' + socket.id;
+      statusEl.className = 'connected';
+    });
+
+    socket.on('disconnect', () => {
+      statusEl.textContent = 'Disconnected';
+      statusEl.className = 'disconnected';
+    });
+
+    function logEvent(type, data) {
+      const el = document.createElement('div');
+      el.className = 'event';
+      el.innerHTML = `<span class="type">${type}</span><span class="time">${new Date().toLocaleTimeString()}</span><pre>${JSON.stringify(data, null, 2)}</pre>`;
+      logEl.prepend(el);
+    }
+
+    socket.on('booking:created', (data) => logEvent('booking:created', data));
+    socket.on('booking:completed', (data) => logEvent('booking:completed', data));
+    socket.on('booking:cancelled', (data) => logEvent('booking:cancelled', data));
+    socket.on('charger:updated', (data) => logEvent('charger:updated', data));
+    socket.on('telemetry:new', (data) => logEvent('telemetry:new', data));
+    socket.on('queue:updated', (data) => logEvent('queue:updated', data));
+  </script>
+</body>
+</html>
