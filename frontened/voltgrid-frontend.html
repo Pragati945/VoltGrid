@@ -66,14 +66,15 @@ dialog::backdrop{background:#000a}
   </section>
 </main>
 <dialog id="dlg"></dialog>
+<dialog id="offerdlg"></dialog>
 <div id="toast"></div>
 <script>
-const API = 'http://10.75.139.184:4000'; // change if your API runs elsewhere
+const API = 'http://localhost:4000'; // change if your API runs elsewhere
 const $ = s => document.querySelector(s);
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const when = d => d ? new Date(d).toLocaleString() : '';
 let token = null, user = null, tab = 'chargers', reg = false, sock = null, feed = [], qStation = '';
-let D = {stations:[], chargers:[], vehicles:[], models:[], bookings:[], queue:[], invites:[]};
+let D = {stations:[], chargers:[], vehicles:[], models:[], bookings:[], queue:[], invites:[], wallet:{balance:0, transactions:[]}, earnings:null, power:[]};
 try { token = localStorage.getItem('vg_t'); user = JSON.parse(localStorage.getItem('vg_u') || 'null'); } catch(e){}
 const staff = () => user && ['admin','operator'].includes(user.role);
 
@@ -95,6 +96,7 @@ function authMode(){ $('#at').textContent = reg?'Create account':'Log in'; $('#g
 $('#sw').onclick = () => { reg=!reg; authMode(); };
 $('#rl').onchange = () => $('#oc').classList.toggle('hide', $('#rl').value !== 'operator');
 $('#go').onclick = () => run(async () => {
+  try { if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission(); } catch(e){}
   const body = {email:$('#e').value.trim(), password:$('#p').value};
   if (reg) { body.name = $('#n').value.trim(); body.role = $('#rl').value; if (body.role === 'operator') body.operator_code = $('#ocv').value.trim(); }
   const d = await api(reg?'/auth/register':'/auth/login','POST',body);
@@ -108,22 +110,25 @@ $('#out').onclick = logout;
 /* ---------- data + live updates ---------- */
 async function load(){
   const g = p => api(p).catch(() => []);
-  let [s,c,v,m,b,q,inv] = await Promise.all([g('/stations'),g('/chargers'),g('/vehicles'),g('/vehicles/models'),g('/bookings'),g('/queue'), user.role==='admin' ? g('/invites') : []]);
+  let [s,c,v,m,b,q,inv,w,earn,pw] = await Promise.all([g('/stations'),g('/chargers'),g('/vehicles'),g('/vehicles/models'),g('/bookings'),g('/queue'), user.role==='admin' ? g('/invites') : [], api('/wallet').catch(() => ({balance:0, transactions:[]})), staff() ? api('/wallet/earnings').catch(() => null) : null, api('/power/stations').catch(() => [])]);
   if (user.role === 'operator') { // operators only see and manage their own stations
     s = s.filter(x => x.operator_id == user.id); const ids = new Set(s.map(x => x.id));
     c = c.filter(x => ids.has(x.station_id)); q = q.filter(x => ids.has(x.station_id));
   }
-  D = {stations:s, chargers:c, vehicles:v, models:m, bookings:b, queue:q, invites:inv};
+  D = {stations:s, chargers:c, vehicles:v, models:m, bookings:b, queue:q, invites:inv, wallet:w, earnings:earn, power:pw};
   if (!qStation && s.length) qStation = s[0].id;
   render();
 }
 let t; const soon = () => { clearTimeout(t); t = setTimeout(() => run(load), 250); };
 function connect(){
   if (sock) return;
-  sock = io(API);
+  sock = io(API, { auth: { token } }); // the token lets the server push offers to this user only
   sock.on('connect', () => $('#dot').className='on');
   sock.on('disconnect', () => $('#dot').className='');
-  ['booking:created','booking:started','booking:completed','booking:cancelled','charger:updated','queue:updated','telemetry:new'].forEach(ev =>
+  sock.on('offer:new', showOffer);
+  sock.on('power:granted', d => { toast('Power is available: your charging started at ' + Number(d.allocated_kw).toFixed(1) + ' kW at ' + d.station_name + '.'); soon(); });
+  sock.on('offer:closed', d => { if (curOffer && curOffer.id === d.id) closeOffer(); soon(); });
+  ['booking:created','booking:updated','booking:started','power:updated','booking:completed','booking:cancelled','charger:updated','queue:updated','telemetry:new'].forEach(ev =>
     sock.on(ev, data => {
       feed.unshift({ev, data, at:new Date().toLocaleTimeString()}); feed = feed.slice(0,60);
       if (ev !== 'telemetry:new') soon(); else if (tab==='live') render();
@@ -133,23 +138,25 @@ function start(){
   $('#auth').classList.add('hide'); $('#app').classList.remove('hide'); $('#out').classList.remove('hide');
   $('#who').textContent = user.name+' ('+user.role+')';
   connect(); run(load);
+  run(async () => { const off = await api('/offers'); if (off.length) showOffer(off[0]); }); // offers that arrived while logged out
 }
 
 /* ---------- views ---------- */
 const tabs = () => user.role === 'driver'
-  ? {chargers:'Chargers', bookings:'My bookings', vehicles:'Vehicles', queue:'Waiting list', live:'Live feed'}
-  : {chargers:'Stations', bookings: user.role === 'operator' ? 'Bookings at my stations' : 'All bookings', ...(user.role === 'admin' ? {vehicles:'Vehicles', invites:'Invites'} : {}), queue:'Waiting list', live:'Live feed'};
+  ? {chargers:'Chargers', bookings:'My bookings', vehicles:'Vehicles', queue:'Waiting list', wallet:'Wallet', live:'Live feed'}
+  : {chargers:'Stations', bookings: user.role === 'operator' ? 'Bookings at my stations' : 'All bookings', ...(user.role === 'admin' ? {vehicles:'Vehicles', invites:'Invites'} : {}), queue:'Waiting list', wallet:'Wallet', earnings:'Earnings', power:"Banker's demo", live:'Live feed'};
 function render(){
   if (!tabs()[tab]) tab = 'chargers';
+  $('#who').textContent = user.name + ' (' + user.role + ') | ₹' + Number(D.wallet.balance).toFixed(2);
   $('#tabs').innerHTML = Object.entries(tabs()).map(([k,v]) => `<button class="${k===tab?'on':''}" data-a="tab" data-id="${k}">${v}</button>`).join('');
-  $('#view').innerHTML = ({chargers:vChargers, bookings:vBookings, vehicles:vVehicles, queue:vQueue, live:vLive, invites:vInvites})[tab]();
+  $('#view').innerHTML = ({chargers:vChargers, bookings:vBookings, vehicles:vVehicles, queue:vQueue, live:vLive, invites:vInvites, wallet:vWallet, earnings:vEarnings, power:vPower})[tab]();
 }
 const vname = id => { const v = D.vehicles.find(x => x.id == id); return v ? v.brand+' '+v.model_name : 'Vehicle #'+id; };
 
 const vChargers = () => vChargersList() + (staff() ? vManage() : '');
 function vChargersList(){
   if (!D.stations.length) return `<div class="box">${user.role === 'operator' ? "You don't manage any stations yet. Add one below, or ask an admin to assign one to you." : 'No stations yet.'}</div>`;
-  return D.stations.map(s => `<div class="box"><h3>${esc(s.name)}</h3><span class="mu">${esc(s.address)}</span><div class="grid">` +
+  return D.stations.map(s => `<div class="box"><h3>${esc(s.name)}</h3><span class="mu">${esc(s.address)} &middot; ₹${Number(s.price_per_kwh).toFixed(2)}/kWh</span>${powerPanel(s)}<div class="grid">` +
     D.chargers.filter(c => c.station_id == s.id).map(c => `<div class="ch ${c.status}">
       <b>Charger #${c.id}</b> <span class="pill">${c.status}</span>
       <div class="mu">${esc(c.connector_type)} &middot; ${c.power_rating_kw} kW</div>
@@ -161,9 +168,9 @@ function vChargersList(){
 function vBookings(){
   if (!D.bookings.length) return `<div class="box">${user.role === 'operator' ? (D.stations.length ? 'No bookings at your stations yet.' : "You don't manage any stations yet. Add one in the Stations tab, or ask an admin to assign one to you.") : staff() ? 'No bookings yet.' : 'No bookings yet. Go to Chargers and book one.'}</div>`;
   return '<div class="box">' + D.bookings.map(b => `<div class="row">
-    <div><b>Booking #${b.id}</b> <span class="s-${b.status}">${b.status}</span><div class="mu">Charger #${b.charger_id} &middot; ${esc(vname(b.vehicle_id))}${staff() ? ' &middot; driver #' + b.user_id : ''} &middot; ${when(b.start_time)} to ${when(b.end_time)}</div></div>
+    <div><b>Booking #${b.id}</b> <span class="s-${b.status}">${b.status}</span>${powerTag(b)}<div class="mu">Charger #${b.charger_id} &middot; ${esc(vname(b.vehicle_id))}${staff() ? ' &middot; driver #' + b.user_id : ''} &middot; ${when(b.start_time)} to ${when(b.end_time)}</div></div>
     <div class="acts">
-      ${b.status==='confirmed' ? `<button class="btn sm" data-a="start" data-id="${b.id}">Start charging</button>` : ''}
+      ${b.status==='confirmed' && !b.power_wait_since ? `<button class="btn sm" data-a="start" data-id="${b.id}">Start charging</button>` : ''}
       ${b.status==='active' ? `<button class="btn sm" data-a="done" data-id="${b.id}">Finish charging</button>` : ''}
       ${['pending','confirmed','active'].includes(b.status) ? `<button class="btn sm red" data-a="cancel" data-id="${b.id}">Cancel</button>` : ''}
     </div></div>`).join('') + '</div>';
@@ -179,7 +186,7 @@ function vVehicles(){
 }
 function vQueue(){
   const q = D.queue.filter(x => x.station_id == qStation);
-  return `<div class="box"><h3>${user.role === 'operator' ? 'Choose a station' : 'Join the waiting list'}</h3><p class="mu">Emergency vehicles move to the front.</p>
+  return `<div class="box"><h3>${user.role === 'operator' ? 'Choose a station' : 'Join the waiting list'}</h3><p class="mu">Emergency vehicles go first, and the longer you wait the higher you move. When a charger that fits your vehicle frees up, the first vehicle in line gets a pop-up asking if they want it now.</p>
   <div class="two"><div><label>Station</label><select id="qs" data-a="qstation">${D.stations.map(s=>`<option value="${s.id}" ${s.id==qStation?'selected':''}>${esc(s.name)}</option>`).join('')}</select></div>
   <div class="${user.role === 'operator' ? 'hide' : ''}"><label>Vehicle</label><select id="qv">${D.vehicles.map(v=>`<option value="${v.id}">${esc(v.brand)} ${esc(v.model_name)} (#${v.id})</option>`).join('')}</select></div></div>
   <p class="${user.role === 'operator' ? 'hide' : ''}"><button class="btn" data-a="join">Join list</button></p></div>
@@ -201,10 +208,81 @@ function vInvites(){
 }
 function vManage(){
   return `<div class="box"><h3>Add a station</h3><div class="two"><div><label>Name</label><input id="sn"></div><div><label>Address</label><input id="sa"></div></div>
+  <label>Price per kWh (₹)</label><input id="sp" type="number" value="18">
   <p><button class="btn" data-a="addstation">Add station</button></p></div>
   <div class="box"><h3>Add a charger</h3><div class="two"><div><label>Station</label><select id="cs">${D.stations.map(s=>`<option value="${s.id}">${esc(s.name)}</option>`).join('')}</select></div>
   <div><label>Connector (e.g. CCS2)</label><input id="cc" value="CCS2"></div></div><label>Power (kW)</label><input id="ck" type="number" value="30">
   <p><button class="btn" data-a="addcharger">Add charger</button></p></div>`;
+}
+
+/* ---------- station power budget ---------- */
+function powerPanel(s){
+  const p = (D.power || []).find(x => x.station_id == s.id);
+  if (!p) return '';
+  const pct = Math.min(100, Math.round(p.allocated_kw / p.limit_kw * 100));
+  const rows = p.sessions.map(x => `<div class="mu">Charger #${x.charger_id}: <b>${x.alloc_kw} kW</b> of ${x.claim_kw} kW${x.throttled ? ' <span class="pill" style="color:var(--busy)">throttled</span>' : ''}${x.emergency ? ' <span class="pill" style="color:var(--bad)">emergency</span>' : ''}</div>`).join('');
+  const wait = p.waiting.length ? `<div class="mu">${p.waiting.length} waiting for power: ${p.waiting.map(x => 'charger #' + x.charger_id).join(', ')}</div>` : '';
+  const ctl = staff() ? `<div class="acts" style="margin-top:6px"><input id="pl${s.id}" type="number" value="${p.limit_kw}" style="width:100px"><button class="btn sm" data-a="setlimit" data-id="${s.id}">Set limit (kW)</button></div>` : '';
+  return `<div style="margin:10px 0"><div class="mu">Power budget: <b>${p.allocated_kw}</b> of <b>${p.limit_kw} kW</b> in use</div>
+    <div style="height:10px;background:var(--line);border-radius:6px;overflow:hidden;margin:4px 0"><div style="width:${pct}%;height:100%;background:${pct >= 100 ? 'var(--busy)' : 'var(--ac)'}"></div></div>${rows}${wait}${ctl}</div>`;
+}
+function powerTag(b){
+  if (b.status === 'confirmed' && b.power_wait_since) return ' <span class="pill" style="color:var(--busy)">waiting for station power</span>';
+  if (b.status === 'active' && Number(b.power_claim_kw) > 0) {
+    const a = Number(b.power_alloc_kw), c = Number(b.power_claim_kw);
+    return ` <span class="pill" style="color:${a < c ? 'var(--busy)' : 'var(--ok)'}">charging at ${a} of ${c} kW</span>`;
+  }
+  return '';
+}
+let bank = null;
+function vPower(){
+  const show = r => `<div class="row"><div><b>${r.title}</b><div class="mu">${r.needs.map(n => n.name + ': holds ' + n.alloc + ' of ' + n.max + ' kW (needs ' + n.need + ' more)').join(' | ')}</div><div class="mu">Free power: ${r.available} kW</div></div>
+    <div><b style="color:${r.safe ? 'var(--ok)' : 'var(--bad)'}">${r.safe ? 'SAFE' : 'UNSAFE'}</b>${r.safe ? '<div class="mu">finish order: ' + r.sequence.join(' then ') + '</div>' : '<div class="mu">nobody can finish: deadlock</div>'}</div></div>`;
+  return `<div class="box"><h3>How the power budget works</h3>
+   <p class="mu">Each station has a grid limit. A charging session claims its full rate (the smaller of the charger's and the car's maximum) and ramps up in small steps. A step is granted only if the new state is SAFE (Banker's algorithm): some order exists in which every session can reach its claim and finish, releasing power for the next one. Sessions that cannot get power wait, and are started automatically when power is released. You are billed for the energy actually delivered, so a throttled session pays less.</p>
+   <p><button class="btn" data-a="bankerdemo">Run the safety check on two states</button></p>
+   ${bank ? bank.map(show).join('') : ''}
+   ${bank ? '<p class="mu">Both states use 90 of 100 kW. Only the second is safe, which is why staying under the limit is not enough.</p>' : ''}</div>`;
+}
+
+/* ---------- payments ---------- */
+function vWallet(){
+  const w = D.wallet, tx = w.transactions || [];
+  const label = {topup:'Top-up', deposit:'Deposit hold', refund:'Refund', final_payment:'Charging payment', penalty:'Late cancellation fee'};
+  return `<div class="box"><h3>Wallet balance</h3><div style="font-size:30px;font-weight:700">₹${Number(w.balance).toFixed(2)}</div>
+    <p class="mu">A booking holds a deposit for its estimated cost. You pay only for what you use and the rest is refunded. Free cancellation until ${w.free_cancel_minutes} minutes before your slot, then a ${w.late_penalty_percent}% fee. Top-ups here are simulated.</p>
+    <div class="acts">${[100,500,1000,2000].map(a => `<button class="btn sm" data-a="topup" data-id="${a}">+ ₹${a}</button>`).join('')}</div></div>
+  <div class="box"><h3>Transactions</h3>${tx.length ? tx.map(t => `<div class="row"><div><b>${label[t.type] || t.type}</b>${t.booking_id ? ' <span class="mu">booking #' + t.booking_id + '</span>' : ''}<div class="mu">${when(t.created_at)}</div></div>
+    <b style="color:${t.direction === 'credit' ? 'var(--ok)' : 'var(--bad)'}">${t.direction === 'credit' ? '+' : '-'}₹${Number(t.amount).toFixed(2)}</b></div>`).join('') : '<p class="mu">No transactions yet. Add money to start booking.</p>'}</div>`;
+}
+function vEarnings(){
+  const e = D.earnings;
+  if (!e) return '<div class="box">No earnings data.</div>';
+  return `<div class="box"><h3>Total earned</h3><div style="font-size:30px;font-weight:700">₹${e.total.toFixed(2)}</div>
+    <p class="mu">Charging payments and late-cancellation fees at ${user.role === 'admin' ? 'all' : 'your'} stations.</p></div>
+  <div class="box"><h3>By station</h3>${e.stations.length ? e.stations.map(s => `<div class="row"><div><b>${esc(s.name)}</b>
+    <div class="mu">₹${Number(s.price_per_kwh).toFixed(2)} per kWh &middot; ${s.paid_sessions} paid sessions</div></div><b>₹${s.revenue.toFixed(2)}</b></div>`).join('') : '<p class="mu">No stations yet.</p>'}</div>`;
+}
+
+/* ---------- push-style offers ---------- */
+let curOffer = null, offerTimer = null;
+function closeOffer(){ clearInterval(offerTimer); curOffer = null; const d = $('#offerdlg'); if (d.open) d.close(); }
+function showOffer(o){
+  curOffer = o; clearInterval(offerTimer);
+  const moving = o.source === 'booking';
+  $('#offerdlg').innerHTML = `<h3>A charger is free now</h3>
+    <p><b>${esc(o.station_name)}</b><br>Charger #${o.charger_id} &middot; ${esc(o.connector_type)} &middot; ${o.power_rating_kw} kW</p>
+    <p class="mu">${moving ? 'Your booking is at ' + when(o.booking_start) + '. Do you want to start now instead?' : 'You were next in the waiting list. Do you want to use it now?'}</p>
+    <p>Offer ends in <b id="offerleft"></b></p>
+    <p class="acts"><button class="btn" data-a="offeryes">Yes, use it now</button><button class="btn ghost" data-a="offerno">No thanks</button></p>`;
+  if (!$('#offerdlg').open) $('#offerdlg').showModal();
+  const draw = () => {
+    const s = Math.max(0, Math.round((new Date(o.expires_at) - Date.now()) / 1000));
+    const el = $('#offerleft'); if (el) el.textContent = Math.floor(s/60) + ':' + String(s%60).padStart(2,'0');
+    if (s === 0) { closeOffer(); soon(); }
+  };
+  draw(); offerTimer = setInterval(draw, 1000);
+  try { if (document.hidden && Notification.permission === 'granted') new Notification('VoltGrid: charger available', { body: o.station_name + ', charger #' + o.charger_id + '. Open VoltGrid to accept.' }); } catch(e){}
 }
 
 /* ---------- actions ---------- */
@@ -216,26 +294,49 @@ const A = {
     $('#dlg').innerHTML = `<h3>Book charger #${id}</h3><label>Vehicle</label><select id="bv">${D.vehicles.map(v=>`<option value="${v.id}">${esc(v.brand)} ${esc(v.model_name)} (#${v.id})</option>`).join('')}</select>
       <label>Start time (now, or pick a future time)</label><input id="bt" type="datetime-local" value="${nowLocal()}">
       <label>How long?</label><select id="bd"><option value="30">30 minutes</option><option value="60" selected>1 hour</option><option value="120">2 hours</option><option value="240">4 hours</option></select>
+      <p class="mu" id="best">Calculating price...</p>
       <p class="acts"><button class="btn" id="bok">Confirm booking</button><button class="btn ghost" id="bno">Close</button></p>`;
     $('#dlg').showModal();
+    const est = () => api('/wallet/estimate?charger_id='+id+'&vehicle_id='+$('#bv').value+'&minutes='+$('#bd').value)
+      .then(e => { $('#best').textContent = 'Deposit hold: ₹' + e.amount.toFixed(2) + ' (about ' + e.energy_kwh + ' kWh at ₹' + e.price_per_kwh + '/kWh). You pay only for what you use; the rest is refunded. Free cancellation until ' + e.free_cancel_minutes + ' min before your slot. Your wallet: ₹' + Number(D.wallet.balance).toFixed(2); })
+      .catch(() => { $('#best').textContent = ''; });
+    $('#bv').onchange = est; $('#bd').onchange = est; est();
     $('#bno').onclick = () => $('#dlg').close();
     $('#bok').onclick = () => run(async () => {
       await api('/bookings','POST',{vehicle_id:+$('#bv').value, charger_id:+id, start_time:new Date($('#bt').value).toISOString(), duration_minutes:+$('#bd').value});
       $('#dlg').close(); tab='bookings'; await load();
     }, 'Booking confirmed');
   },
-  start: id => run(async () => { await api('/bookings/'+id+'/start','PATCH'); await load(); }, 'Charging started'),
-  cancel: id => run(async () => { await api('/bookings/'+id+'/cancel','PATCH'); await load(); }, 'Booking cancelled'),
-  done: id => run(async () => { await api('/bookings/'+id+'/complete','PATCH'); await load(); }, 'Charging finished'),
+  start: id => run(async () => {
+    const r = await api('/bookings/'+id+'/start','PATCH'); await load();
+    toast(r.waiting_for_power ? r.message : 'Charging started at ' + Number(r.power_alloc_kw).toFixed(1) + ' kW' + (Number(r.power_alloc_kw) < Number(r.power_claim_kw) ? ' (throttled: the station is busy)' : ''));
+  }),
+  cancel: id => run(async () => {
+    const r = await api('/bookings/'+id+'/cancel','PATCH'); await load(); const p = r.payment || {};
+    toast('Booking cancelled. ' + (p.charged ? 'Charged ₹' + Number(p.charged).toFixed(2) + ' for the time used. ' : '') + (p.returned ? '₹' + Number(p.returned).toFixed(2) + ' returned' : 'Nothing was held') + (p.penalty ? ', late fee ₹' + Number(p.penalty).toFixed(2) : '') + '.');
+  }),
+  done: id => run(async () => {
+    const r = await api('/bookings/'+id+'/complete','PATCH'); await load(); const p = r.payment || {};
+    toast('Charging finished. Charged ₹' + Number(p.charged || 0).toFixed(2) + ', ₹' + Number(p.returned || 0).toFixed(2) + ' returned to your wallet.');
+  }),
+  topup: id => run(async () => { await api('/wallet/topup','POST',{amount:+id}); await load(); }, 'Money added to your wallet (simulated payment)'),
   addveh: () => run(async () => { await api('/vehicles','POST',{model_id:+$('#vm').value, is_emergency:!!($('#ve')&&$('#ve').checked)}); await load(); }, 'Vehicle added'),
   delveh: id => run(async () => { await api('/vehicles/'+id,'DELETE'); await load(); }, 'Vehicle removed'),
   join: () => run(async () => { await api('/queue','POST',{station_id:+$('#qs').value, vehicle_id:+$('#qv').value}); await load(); }, 'Added to the waiting list'),
   qcancel: id => run(async () => { await api('/queue/'+id+'/cancel','PATCH'); await load(); }, 'Removed from the waiting list'),
   qstation: () => { qStation = $('#qs').value; render(); },
-  addstation: () => run(async () => { await api('/stations','POST',{name:$('#sn').value.trim(), address:$('#sa').value.trim()}); await load(); }, 'Station added'),
+  addstation: () => run(async () => { await api('/stations','POST',{name:$('#sn').value.trim(), address:$('#sa').value.trim(), price_per_kwh:+$('#sp').value}); await load(); }, 'Station added'),
   addcharger: () => run(async () => { await api('/chargers','POST',{station_id:+$('#cs').value, connector_type:$('#cc').value.trim(), power_rating_kw:+$('#ck').value}); await load(); }, 'Charger added'),
   mkinv: () => run(async () => { const i = await api('/invites','POST',{note:$('#ivn').value.trim(), days:+$('#ivd').value}); await load(); toast('Invite created: '+i.code); }),
   revinv: id => run(async () => { await api('/invites/'+id,'DELETE'); await load(); }, 'Invite revoked'),
+  offeryes: () => run(async () => { const id = curOffer.id; await api('/offers/'+id+'/accept','POST'); closeOffer(); tab='bookings'; await load(); }, 'The charger is yours. Start charging!'),
+  offerno: () => run(async () => { const id = curOffer.id; await api('/offers/'+id+'/decline','POST'); closeOffer(); await load(); }, 'Offer declined'),
+  setlimit: id => run(async () => { await api('/power/stations/'+id+'/limit','PATCH',{power_limit_kw:+$('#pl'+id).value}); await load(); }, 'Power limit updated'),
+  bankerdemo: () => run(async () => {
+    const a = await api('/power/banker','POST',{capacity:100, sessions:[{name:'Car A', max:60, alloc:45},{name:'Car B', max:60, alloc:45}]});
+    const b = await api('/power/banker','POST',{capacity:100, sessions:[{name:'Car A', max:60, alloc:50},{name:'Car B', max:60, alloc:40}]});
+    bank = [{...a, title:'45 kW + 45 kW'}, {...b, title:'50 kW + 40 kW'}]; render();
+  }),
   cstat: id => run(async () => { await api('/chargers/'+id+'/status','PATCH',{status:document.querySelector('select[data-a=cstat][data-id="'+id+'"]').value}); await load(); }, 'Charger updated'),
 };
 document.addEventListener('click', e => { const b = e.target.closest('button[data-a]'); if (b) A[b.dataset.a](b.dataset.id); });
