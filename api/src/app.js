@@ -10,6 +10,10 @@ const bookingRoutes = require('./routes/bookings');
 const queueRoutes = require('./routes/queue');
 const telemetryRoutes = require('./routes/telemetry');
 const ledgerRoutes = require('./routes/ledger');
+const inviteRoutes = require('./routes/invites');
+const offerRoutes = require('./routes/offers');
+const walletRoutes = require('./routes/wallet');
+const powerRoutes = require('./routes/power');
 
 const app = express();
 
@@ -27,6 +31,10 @@ app.use('/bookings', bookingRoutes);
 app.use('/queue', queueRoutes);
 app.use('/telemetry', telemetryRoutes);
 app.use('/ledger', ledgerRoutes);
+app.use('/invites', inviteRoutes);
+app.use('/offers', offerRoutes);
+app.use('/wallet', walletRoutes);
+app.use('/power', powerRoutes);
 
 // 404 fallback
 app.use((req, res) => {
