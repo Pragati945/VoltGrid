@@ -8,6 +8,7 @@
 //   getIO().emit('booking:created', booking);
 
 const { Server } = require('socket.io');
+const jwt = require('jsonwebtoken');
 
 let io = null;
 
@@ -18,8 +19,19 @@ function initSocket(httpServer) {
     },
   });
 
+  // Optional login: a client that sends its JWT joins a private room 'user:<id>' for personal push messages.
+  // Clients without a (valid) token still connect and get the public events, as before.
+  io.use((socket, next) => {
+    const token = socket.handshake.auth && socket.handshake.auth.token;
+    if (token) {
+      try { socket.user = jwt.verify(token, process.env.JWT_SECRET); } catch (e) { /* invalid token: stay anonymous */ }
+    }
+    next();
+  });
+
   io.on('connection', (socket) => {
-    console.log(`Socket connected: ${socket.id}`);
+    console.log(`Socket connected: ${socket.id}${socket.user ? ' (user ' + socket.user.id + ')' : ''}`);
+    if (socket.user) socket.join('user:' + socket.user.id);
 
     // Clients can join a "room" for one station, so they only receive
     // events relevant to the station they're viewing (e.g. a driver
@@ -58,4 +70,13 @@ function emitSafe(event, payload) {
   }
 }
 
-module.exports = { initSocket, getIO, emitSafe };
+// Push a message to ONE user (all of their open tabs/devices)
+function emitToUser(userId, event, payload) {
+  try {
+    if (io) io.to('user:' + userId).emit(event, payload);
+  } catch (err) {
+    console.error(`Socket emitToUser failed for "${event}":`, err);
+  }
+}
+
+module.exports = { initSocket, getIO, emitSafe, emitToUser };

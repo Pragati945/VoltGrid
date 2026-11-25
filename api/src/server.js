@@ -8,6 +8,7 @@ if (!process.env.JWT_SECRET) {
 const http = require('http');
 const app = require('./app');
 const { initSocket } = require('./socket');
+const { startScheduler } = require('./scheduler');
 
 const PORT = process.env.PORT || 4000;
 
@@ -19,4 +20,6 @@ initSocket(httpServer);
 httpServer.listen(PORT, () => {
   console.log(`VoltGrid API listening on http://localhost:${PORT}`);
   console.log(`Socket.IO ready for real-time connections`);
+  startScheduler();
+  console.log('Queue scheduler running');
 });
